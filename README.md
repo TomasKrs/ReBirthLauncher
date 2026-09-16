@@ -110,3 +110,7 @@ Operating System: Windows 10 or Windows 11 (64-bit recommended).
 Privileges: Administrator Rights (required for virtual drive mounting and registry operations).
 
 ReBirth Installation: Rebirth.exe and any valid .iso disc image placed in the same folder as the launcher {you can also have a mini rebirth cd with only 2 files).
+
+
+Ideas: TomasKrs
+Programmed by: AI
