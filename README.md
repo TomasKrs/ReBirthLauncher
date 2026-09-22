@@ -1,3 +1,154 @@
+# ReBirth ToolBox
+
+### Portable launcher & studio toolkit for **Propellerhead ReBirth RB-338**
+
+<p align="center">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white">
+  <img alt="UI" src="https://img.shields.io/badge/UI-Tkinter-1A1C27?style=for-the-badge">
+  <img alt="Mode" src="https://img.shields.io/badge/Super%20Rack-emulator%20bezel-FF9500?style=for-the-badge">
+</p>
+
+---
+
+## What is this?
+
+**ReBirth ToolBox** is a modern Windows front-end for the classic **ReBirth RB-338** soft-studio.
+It does **not** redistribute ReBirth itself — it helps you **install, launch, manage mods/songs**, and run ReBirth in a clean **emulator-style Super Rack** view.
+
+<img width="923" height="940" alt="obrázok" src="https://github.com/user-attachments/assets/a69b1597-1910-4eb7-9216-fc4cb1add167" />
+
+Think of it as:
+
+> a portable control room for ReBirth — setup wizard, song library, RBM mods, pattern tools, and a full-screen rack bezel.
+
+---
+
+## Highlights
+
+| | Feature |
+|---|---|
+| **Get ReBirth** | Download sources → **extract** the installer EXE with 7-Zip into *this* folder (setup is never launched) |
+| **Start** | Launch songs/mods with CPU affinity, resolution, Maximize, or **Super Rack** |
+| **Super Rack** | Minimize other apps, hide taskbar, fit a sharp display mode, center the rack with left/right wallpaper bezel |
+| **RBM DB** | Browse / preview ReBirth mods |
+| **Inspire Me** | Generate & edit TB-303 / TR-808 / TR-909 style patterns |
+| **Song Library** | Scan, filter, favorites, random pick |
+| **Documents** | Manuals & notes next to your collection |
+| **Learning Center** | Built-in tutorial steps |
+| **Settings** | Themes, folders, ISO path, Super Rack screen mode, collection backup (7z) |
+
+---
+
+## Super Rack
+
+Immersive “arcade / emulator” presentation of the ReBirth window:
+
+1. Minimizes other programs  
+2. Hides the Windows taskbar  
+3. Optionally switches to a **sharp fit-height** resolution (no blurry magnifier)  
+4. Keeps **File / Edit / Mods** menu  
+5. Centers the rack with **side bezels** (wallpaper)  
+6. Restores desktop + taskbar when ReBirth closes  
+
+> **Super Rack screen:** `Fit height (sharp, side bezel)` · or · `Keep desktop`
+
+---
+
+## Quick start
+
+### Option A — EXE (recommended)
+
+1. Put `ReBirthToolBox.exe` in your ToolBox folder (same place as `Mods`, `Songs`, ISO…).  
+2. Run it **as Administrator** (ISO mount needs elevation).  
+3. Open **Get ReBirth** and finish the wizard.
+
+### Option B — Python
+
+```bash
+python ReBirthToolBox.py
+```
+
+### Build the EXE yourself
+
+```bat
+build_exe.bat
+```
+
+Uses **PyInstaller** (`--onefile --windowed`). Output:
+
+- `dist\ReBirthToolBox.exe`  
+- copy also as `ReBirthToolBox.exe` next to your collection  
+
+---
+
+## Get ReBirth wizard
+
+| Step | Action |
+|:---:|--------|
+| **1** | Download / place the **ISO** + **RB-338 2.0.1 Installer** into `Downloads` |
+| **2** | **Extract ReBirth here** — 7-Zip unpacks the installer EXE into the ToolBox folder (**does not run setup**) |
+| **3** | Restart ToolBox when `Rebirth.exe` appears |
+
+> **Requires [7-Zip](https://www.7-zip.org/)** (`7z.exe` on PATH, or copied into the ToolBox folder).
+
+URLs are yours — stored in `ReBirthToolBox.json`. The ToolBox does not ship copyrighted ReBirth binaries.
+
+---
+
+## Folder layout
+
+```text
+ReBirthToolBox/
+├── ReBirthToolBox.exe      (or ReBirthToolBox.py)
+├── ReBirthToolBox.json     settings
+├── Rebirth.exe             after Step 2 extract
+├── Downloads/              ISO + installer
+├── Mods/                   RBM / skins
+├── Songs/
+├── Default Songs/
+├── Documents/
+└── PatternBanks/
+```
+
+---
+
+## Requirements
+
+- **Windows 10 / 11** (64-bit)  
+- **Administrator** rights (mount ISO, display mode, Super Rack)  
+- **7-Zip** for Step 2 extract  
+- Your own legal copy of **ReBirth RB-338** materials (ISO / installer)  
+- Optional: **Python 3.10+** + Pillow if running from source  
+
+---
+
+## Legal / courtesy note
+
+ReBirth RB-338 is a classic Propellerhead product.  
+This project is an **independent community ToolBox / launcher**.
+
+- We **do not** include ReBirth installers, ISO images, or commercial content.  
+- You provide your own files and download URLs.  
+- Use at your own responsibility and respect applicable copyright.
+
+---
+
+## Credits
+
+Built for people who still love the silver rack, the 303s, and that late-90s glow.
+
+**Propellerhead ReBirth RB-338** © their respective owners.  
+**ReBirth ToolBox** — community launcher & workflow layer around it.
+
+---
+
+<p align="center">
+  <sub>Close ReBirth → ToolBox restores your desktop. Stay acid.</sub>
+</p>
+
+
+
 # ReBirthLauncher
 
 Modern Companion, Native Compatibility Wrapper & RBS Pattern Inspector for Propellerhead ReBirth RB-338
