@@ -18,6 +18,7 @@ import urllib.request
 import zipfile
 import copy
 import re
+import hashlib
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -36,8 +37,9 @@ except ImportError:
     HAS_PIL = False
 
 DOCUMENT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff"}
-DOCUMENT_TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".log", ".rtf", ".xml", ".ini", ".cfg"}
+DOCUMENT_TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".log", ".rtf", ".xml", ".ini", ".cfg", ".yml", ".yaml", ".toml", ".nfo", ".diz", ".asc"}
 DOCUMENT_HTML_EXTENSIONS = {".html", ".htm"}
+DOCUMENT_OFFICE_EXTENSIONS = {".docx", ".doc", ".odt", ".xlsx", ".xls", ".ods", ".pptx", ".ppt"}
 DOCUMENT_PREVIEW_SIZE = (140, 96)
 DOCUMENT_EXT_COLORS = {
     ".pdf": "#FF453A",
@@ -48,6 +50,12 @@ DOCUMENT_EXT_COLORS = {
     ".json": "#00FF66",
     ".csv": "#8A2BE2",
     ".xml": "#FF9500",
+    ".docx": "#2B579A",
+    ".doc": "#2B579A",
+    ".odt": "#2B579A",
+    ".xlsx": "#217346",
+    ".xls": "#217346",
+    ".ods": "#217346",
     ".png": "#00E5FF",
     ".jpg": "#00E5FF",
     ".jpeg": "#00E5FF",
@@ -55,6 +63,30 @@ DOCUMENT_EXT_COLORS = {
     ".bmp": "#00E5FF",
     ".webp": "#00E5FF",
 }
+# Documents browser: scan whole ToolBox tree with optional type filters.
+DOCUMENT_FILTER_DEFS = (
+    ("PDF", frozenset({".pdf"})),
+    ("TXT", frozenset({".txt", ".md", ".log", ".rtf", ".nfo", ".diz", ".asc"})),
+    ("HTML", frozenset({".html", ".htm"})),
+    ("DOCX", frozenset({".docx", ".doc", ".odt"})),
+    ("XLSX", frozenset({".xlsx", ".xls", ".ods", ".csv"})),
+    ("Other text", frozenset({".json", ".xml", ".ini", ".cfg", ".yml", ".yaml", ".toml"})),
+)
+DOCUMENT_BROWSE_EXTENSIONS = frozenset().union(*(exts for _, exts in DOCUMENT_FILTER_DEFS))
+DOCUMENT_SCAN_SKIP_DIRS = frozenset({
+    ".git", "__pycache__", ".toolbox_cache", ".venv", "venv", "env",
+    "build", "dist", "node_modules", ".mypy_cache", ".pytest_cache",
+    ".previews",
+})
+DOCUMENT_SCAN_SKIP_FILES = frozenset({
+    "rebirthtoolbox.json",
+    "rebirth_toolbox_config.json",
+    "mod-catalog.json",
+    "learning_center_progress.json",
+})
+CONTENT_DESIGN_WIDTH = 925
+WINDOW_START_WIDTH = 925
+WINDOW_START_HEIGHT = 980
 PATTERN_BANK_FORMAT = "rebirth-toolbox-pattern-bank"
 PATTERN_BANK_VERSION = 1
 
@@ -209,6 +241,19 @@ DEFAULT_DOWNLOAD_CATALOG = {
         "hint": "ReBirth 2.0.1 setup from the Mooglala archive bundle on Archive.org.",
     },
 }
+
+# Optional exact SHA-256 fingerprints (fill in when you know them).
+# Discovery also works without these via size / name / content heuristics.
+KNOWN_DOWNLOAD_SIGNATURES = {
+    "iso": [
+        # {"sha256": "....", "label": "ReBirth 2.01 CD (2001)"},
+    ],
+    "installer": [
+        # {"sha256": "....", "label": "RB-338 2.0.1 Installer"},
+    ],
+}
+
+_DOWNLOAD_FP_CACHE = {}  # path -> (mtime, size, fingerprint_dict)
 DEFAULT_DIRECTORY_PATHS = {
     "songs": "Songs",
     "documents": "Documents",
@@ -579,18 +624,127 @@ DEFAULT_SONG_OPTIONS = [
     ("ReBirth 1.0 Default Song", "ReBirth 1.0 Default Song.rbs"),
 ]
 
-# Base64 encoded 32x32 studio synth icon
+# App icon (PNG 64x64 fallback). Prefer rebirth_toolbox_icon.ico/.png next to the EXE.
 APP_ICON_BASE64 = (
-    "R0lGODlhIAAgAPMAAMwAAAD/AP///0BAQIyMAMzMM8zM/93d3b29vdzc3LW1tbW1/8z//2Zm"
-    "ZgAAAAAAAAAAACH5BAEAAAEALAAAAAAgACAAAASOMMiJqp134807/2AohkRZmlzpnmu6vnAs"
-    "z3Rt33qu73zv/8CgcEgsGo/IpHLJbDqf0Kh0Sq1ar9is9osNj8lkbrmMXq/YrHaLXWq/4LB4"
-    "SCyaz+ijup0+u+PxeUp7e3+AfYGGh26Ki4yNj4+RkJKSkpOWl5iZmpucnZ6foKGio6Slpqeo"
-    "qaqrrK2ur7CxgREAOw=="
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAXn0lEQVR4nNVbeZRfdXX/vOW3zmSW"
+    "zCSZJZlMSEwkmAShiFU5YupCIJUWK4pHGwXFav/pUWul9mj10HpatbSVFk4pPa5HXBABq2gRgapk"
+    "K02ULIQkJJnJ7Jl95re8refe7/re7xfsn+2Dye/33u+73Hu/d7/3OUmSJLjIFccx6GfP8/D/8Yqi"
+    "CI7jwHXdi47xX2qyQrxareLUqdMYHR1FtVbjZw6c3wyBo/5JeLxNabpL5G/mmXiaGvi/vHgeHBTy"
+    "efT0rMHGjZegXC5rXIgIRIwGEJMMB9CtGnj02DHcf/+X8dOfPoGhoWFUKhW5jURM/G+eOOnnjKDE"
+    "Ue9tFjBf0xCAIeKpBuAso4p7MZbWVr8T7IVCEf39vXjDG67Fbbe+Fzt2bG/ArSkBEjmAKHbnX30O"
+    "X/qne7EwN49yuYRCoWCo6Dh6odRyLoEswM4eouIAPmMbuSYSqEGifZo9t77zp7VhksSIohj1IMDS"
+    "0hJaW1rw/ve/D5/9zKcZBxJrWyQcRQC14OLiEvbsuRUPP/IDdHV3Ief7WhfwBNeBKwEjIjBSTJDM"
+    "iUkEFPvLsxXf5QkrgtjUaiSc/VyMtZiI1xSwOfwZx+JeyT4d5uTkFN74xp144JtfQ2dnZ4oTHCKA"
+    "mBjz3803vwuP/OCH6OvtQRAE1mK0AVALEwRBbECQyAOSqo4NnhpicUsz9lCoXOR5Vi1owlkHR8vm"
+    "fAeFHHEp4WN+83M5TIyPY+cbrsX3v/9d5PN5eWiOIIBSeMT2n/r0Z9HX14egXtfAe66DpWoMz3Ow"
+    "qa+MzetK6FyRS8u14gheNEUfoQMklErxORZSQobNUq51b87ZcJi4k2KViBOfXQzxwvkKXhheRhDF"
+    "aCl4iIgKkkiE9MjICD7+8Y/ic399p1byThRFCbHKyZOn8JrXvl7LOEGgqLRUjXD1pW247fpebF5b"
+    "xnItwXJNiIVQYhJAgpyexDRXYJbiBxpni4WSY1uVatUgxxg9muYLho8+xa+lgouWoovToxV8+cfj"
+    "+M/DMygXPc1ZPN51UK1U8dRTj2PH9u1MBF8phfvuux8zs3NYvaobYRjqjSr1GLff0Idbd/XgmaML"
+    "+OT9L+LE+QqqdQW2dYw2shkFZoY0MQcKwYu7JBppZGbHUj6KOQeX9BZx0zWr8PnbL8E3Hh/HPz8y"
+    "goJv9vVcD5VqFffc8y+49567BUwkAmTnX/3b1+Ds2XMokqZMEpb5pUqE23f34QPX9+Jz3xzC934+"
+    "xc+LeQ9CkQqdz4dgW3qlJO1jbWKCbFqkFdtFrIM1WChZeZsIp60WxAijGDdc3YVPvWcQ33hiHHc/"
+    "NMycQcqRLtJrXV0rceDAM2hvaxOO0KnTp3H23DDyFvLL1RhXvbwN77++F3/zrSE88OQEuttzgq0T"
+    "ZeoEf7oSeT4RUpgZ5HmsFA/FzuInKQYpv0D5AVLeLUK41p7aDEqJdVwXZZ/2dvHwL6d4yU/vGcTh"
+    "k4t4+lczWFEinZAgl89jdHQMx48/j6tfdZVQ3aMjY6hWK2n76AC37urDwROL+O7TU+huzyNOHMSx"
+    "QCFOW2gJjEDeyLqAjr6zRGtzaSxDapziG6k7BBxpMVF/RgNbHMOcAD6oH+y7gKcOz+J91/Ug7xsO"
+    "IBNeq9cxPHxeExW1Wk0PoHVr9RgbekvYOtiCB5+etAWbJ7iuzxrU81z4nsd/nu/zpyu/e/I736sx"
+    "fJ+D6+fgeDSG/uje5+cko2JdsYaeK9dTf3rPzNq2VSLLRSK7sa+EzevKqAYJWxe2VEmCWrXKQ0Us"
+    "oF1aQaF6GPPEIEzw/HCFbSvxmjD3DhYWFxHHkZbzxCHbywpF8qPSAdYp8ekr4dDGUP4qzJX25thM"
+    "EpcpOYr53risZpyUEziuxx4r7U2KMZ9zcGqkgsVqhE39Jfz69KLcP21t/Myaaj2sKHvMCdV6zETh"
+    "zYg49Tp+Z+e1uPzyHdLH12SwLIEt6dqxz1wZ45bx/xl9qelEgGSUqEFcDPFcF8eOH8Pjjz8hvFTp"
+    "uxDsZMVWlP10IKZhhiSAUt5Zt1YhRLLteexbv/MdN+MjH/kTTE9PIwojrZmVzVaIJTEpJouiOv5L"
+    "U8LSdzqwsbSkGcXPjPq3+IF11y23vAN9ff2471/vR2u5zCKtAi0TWijFalb25S9Z51XuY9ndOGZv"
+    "avfuG3DkyFF85atfg+d7yOfy1vEZX4CVlRWhaWdJyqB9/ilclYOkT1uKlh1LWCYxjiIsL1fwB2+7"
+    "CbuuewseeOBbCMNAU1LRMoWh9dXXFG4w0TJaUQglCSsj+l6rB3A8l93ljZtehlwuz3bYXoLMqb2h"
+    "do+ZGJYJzEhKA5ANLqD5nfY8cfwom0BycBjGXI5tveIq7Z2o9SzCphMiFlBaRPQkKQaOgyAK0du7"
+    "Blu3bmXqt7W3p1iqMaHR6MgKLlCb2qxp7pvF7tkx9Hfp1ssY5g2D60UGSNNSUF0Z1+x8pAngaPuc"
+    "5hRpk5l9BVuGQYjOjnbcdONbWauSNZCGWB+oADB9oAooFb42JCaMqmjKEFkLoBiJTKfgTg/nR0Ys"
+    "RSnl3xYtLY4NBDCXLSvsGtgKSUZe9VrA1oD9As/It83OwhoSwuQnCiKRuUxppUbTIC+1gAcnCeXw"
+    "ZjFEgnosotZcnDfKTukJ6bU2iLf1yBcjG1lUb2lNpgVJ7oqlIn/mcr7IEWqY1BGSEXORRAnceAFR"
+    "boVg2Tg0Ok6ZOgso89xFEifw4nmEPs0FzzXeg44KUCqVWOZLxQIraqVmFCeJ5I1SCPKbinghCaBD"
+    "4Je4BH6UIXaxb99+dHd3YWRkFNu3bUtpedYhrKGqGKgdQMeFvVisJDi74YOIcu1wSWQyCVI7ZGWn"
+    "Kq5goLIXHdP7sVDzcG6Q5q5gblBzaTyZv71796Ovtw9TFyaxZvXqFB5pdWf4x75c+xdtj1+COWnn"
+    "ffsP4Oy5Iezduw9BGLBci7RZDMQRAhTQPrMPfUPfRmH2BaxZOIDu848gdPJI4ojHxeqT/2RaK4kR"
+    "II/O6WfQM/wgcnOn0bOwD11j/47QpROOeCzZeJpH8/cfOIBzw+ewf/9BROSdagIoQtkeg+VnSK53"
+    "UyyoFIUOOowVVSxFEVWxWGT/u1gqCcRlHi6OBFAse3PDcCpTCNwiltEKrzLJSCtkaWX+LvON4rma"
+    "OwSvNovIKWI5aYG7PMkaXtBIEE3NKRWLnLcsFCnhmU20Gz5I3Uv9lCKArQaUw6JYyBBEZl3DkNNN"
+    "lDgRKSlxinSxP+AkuFAtYPj8JJKwiv84PIXTFwDfc3XuUZlBns9EjHlNAmhyOYfz58cRhxU8dmgK"
+    "Z6Yp6HL4hAWnWISjeVEkvFLlbDURshQpKGpU+UJkBzTRB8K2OzLlJdiKfAAFiGZhpXXrS0gGd+LE"
+    "0LMoHT0Mt20Dws03IR9UrdCVQpaMfNLcYAm45M14YeQwCseeQ65zE6LNN8KvV/h3XU6RhCCiKfFT"
+    "2eFmWKcMmvXpN5JHem0WS1jhDl+Uc1eUJ1Npp815POmFXAu8nX+J6uIEOlpWInbJQ6tJX4C4xKTH"
+    "U0SIAiDfBmfnZ1FdnERHSxcS10cU1sWcWIlPzAdCXEhwkPtLcGhBTlSdQnCDXRyzYiE0lsZUxUUt"
+    "kiEmFR12Xfdmjgt6e3rYKhiWNg4KWDkCScsqBGT+opr0C0wIa3wHqXtkCOyENYEGzY1COFGNIytW"
+    "skow6fTDGNe95c1oaSlj7dq12hppYJW+aai2GQq4AgbbObFoIf8xllfAeuDAQYyMjGHvvv3sGSoZ"
+    "Ftpd1hgIQEqv1StwImHvmVtYbCJWpiw+JPdhyH8hPyOAHTEuqCFJiMuk1eB9IvMdCQ4eJFhGsH//"
+    "fql/DJG1HrPFWnm18nIFPdJyL9JUaVZRn8QBlFObm5/D2MQEwijkjemTWTEiROg+AsIQ434BS+QL"
+    "ksIMAxRrVYy6OTy0pk+IShRh1MthJJdHIajDiUI+ddIxAc2LRKmL1gzkuqz0JPHGxsYxP7+AiQlp"
+    "KTIn3BBVZUTObTjxDOtnGYNOmfxu8rCUVnc8j+tuJBYlz0MJ4O/tAH7Wuw5n29uxKo4wVW7Fr7t7"
+    "4efzmCuWEBVK6I5C/HplN06u7Mb5tnY8292DzlwOUamEh9YOws0X2OxSnbfkucjnC7wXpcyIC7iC"
+    "TQkQupdOmNH2Jkpzsvg0swL2ZWgoxcMihGZzWX+fGh3F+bExFJFgYnUfFjpWYvDoUSyv7MZM5OLE"
+    "7DTipUUc6XEw61eweXIE9cUKDp45heW+fowPDaFUqeC852K+1IrO//olRrpWY+iyPPYffx5dM1M4"
+    "s/1KlKYn0DExhsB1sbqjA30DA9IPEQpZ6AhpCiXyxmm23Hvri4+ml0lA2OksZRyCoI4gCDkvkHMd"
+    "PHNmCN879SLynStRH5qEFwYoz85i/LWvR/vBHyM3PYNvD2xAWAO6Dh3As3AR5os4MjGCsWvfhPLE"
+    "KPKjI4DvI+hehUPD51CZXoT/3PM4Vasi6O9H8OTToGC3SGKwuICd3R1478AAqvU6gjDk3ESjsrOi"
+    "TJ1UUSGxFQsgGzDpVSQ7WROI4l1dXZyAXLOatHSEywbWolhdRti9msIYTAcRjva/DlvyPtqdLVhy"
+    "fST5PC6Zu4DhK67EfLkF3VMTmNnxCmxsb0drexlxfy/q5F0W8nj2be/ADT//Kdy5WZxYvxG13j5s"
+    "OnoYHa4HJ47gjo9h3YYNqIUhurtWolwqcWxiZQsNKhbixpQba+HbXJ6lgZ204GmUD4hCXHHFK1nG"
+    "29pWcCWmf2UnBq95HSs1L44xUyxjY+sK7JiaQGltDx5c/zJ0BTXcePYknuhZi1Mtbbhu5CweuOTl"
+    "eNPIOVw6N41HL70UlXweN714AmcmzqJ343pUcy/D+Q2b8Ycnj2H15k3wyHoQPFs2MQdSJHrlFa9E"
+    "S0sLOjs7tMgzojKUtQNvQwojA36GXPo3HVZyskQFKwknIH70o8ewdetlOHToEG655Z08jVhRbOjA"
+    "q81hx+wMqtRbEATYMDKEUhJjKoiQLCxgOVdEYW4GK2anUZifx3QQYP34CCLXxVwYo31pCfO0daWK"
+    "V509jWK1ikWSdSrcsJkUThEp48ce+wl27NiBI0eew65du4yXqAuzKkctT5lNo8x6wSJAyvtVvkqW"
+    "qSgfwC6n6SZR5Wmle9kKU0oaPnuUdd/HlsV5Lpkt5fLYsLyI/uoyqrkidg+9iNh1UfNy6K1WeS6J"
+    "gWI/Wn/b9BRqHqW1ZdVZhq3sc0TGMhFMZC7TKCiWaEw2qrP2s4evposTN+IhwkgZ9WmnR4W1IoGR"
+    "Sp7owCRBlWJ8LnbE8BKgTLbdASLRoMB7BFIsXULC+CyoUMWHtbsMYixpZpdY+gPKDU5RQOm2TEhs"
+    "0QGNIqD9B9n5YWd6FFFlRlZNEW0pppBhA8InJwMVdrBS8bjtGosPQlCl/1Xc0OjG2rGHapEx1jqV"
+    "NLOQV2KgAzJkgqG0krAP1JS7ua5Wq3EaisrqggMoManiAdUyY8yNdtFlnJFCRhPdeJ9qhAhZjW8n"
+    "vlCZTuQCSDcRDBQQUQebSs2r5gnrCJiounhjgeBrlFWZSwcQNtuYmjxtsm3bNjY727eLdBjJntlU"
+    "9OeoncQZpttgNKIU0VkYpwE3BBKVZTWICC5FIEkYllWrVmHbtlek2uUEx5n0ucIma+18g2IGOuUN"
+    "atYEfDKDYYhXXnEFqpUKent7Ua8HprjZJAnR/Mr4501+TxPM5iSDCIUbZJLDMEJ/fz9mZ2fNqlpn"
+    "GdySi+uARFNNibxiJdOQJMlEJq8iegnopHM50SyV9RnsXdK/m+yCsCLGzKZqdxYLq7nKLNvFEdXi"
+    "Q2Kp1lA72Bkgm5C2yPka1qwVkAhkHjPb1us1nDlzRm4uChPNTlPF4jrNbpX9BGPr6mnWP2m8hIOv"
+    "CZbyzx1gYN2AJI5Vas84Q2oNy8uDJoCxoA063NpcUHhsfAI//8UvOSoDuaes6BWbpvv97DydIL5J"
+    "aBiEVSnMzMu2xCkdZTfM0QFwGbxWRRRReWwwpTibm740hX01Uqb7rENIqUB9klx793xuSCBOaG3r"
+    "YBbUZjDrUek8nuoqtXaxkxM6X23itrRYGeui7ilZsjQ/z6X4XKEg1ycrYao/qV5GdZANBHBs7y+7"
+    "oQBSydni4iI3Ul71W1dycoJbaZv6APK7lMlUqTw7Sss4hVKSE6S3mT6W9JmqVli6BtatxdzsHJaX"
+    "l4V+UuGwTvGJ/xzV6ZIiAF0WpWw7rOy3aqJ++JFH8d49e3D5durAVvbYOMIpzSPrcqmEKXuFilmM"
+    "QhNCKPvA1HMrklMg6u9an4gNFxaX8Mijj6JarXGZjNLkgvvsWF4GSRZr+BpcO5YmE8PdngJYcR9x"
+    "i9mJ50/g85//Atb09NitFxpALadS8F11qkp7W12oWWuY1gNGL9jxu0mLa5ryWhMTE7hw4YIokJB/"
+    "IVtuOX6SDWA2rg3lcbrUNjRpYqaOcsHjnuD5So0Hcs9toYD5+XlcmJ5OJx2tYEh8sQ25aLb+TZcR"
+    "BVv+jd+vTXOmvE5jKTLkPkeyTBRnxAnD3lL0GBdWzjamthVwLGVB1Cr4jmg6DiJc9fIVOD60jFLe"
+    "50VpA+oUoU4MhagOHzLsKuJyzfCGWCk7nyJBUzvY7D0BNV5lrCmoUs3RtDY1SF2+qRWeCxw7t4x8"
+    "zm3iaUIQoFQqiiZJuXgu52BsuoYnD8/i5tevxsO/mEI9TJDzRLqaNtLIqOZIC3nRMW44IWPQ9HPr"
+    "2K2xzf0Jm0RGN2TcbUn5MEq4te+dO1dj39E5DE9W0VryRNAmlSclUehi2NetW8cPCDFl8miBr/xk"
+    "jFvMPnbzALfLExGoZV41HLKMSbdR3TvyGVVtxMsVSkJMp6h6phIT+k9qKkMEeW+NobVJnMxa4ndC"
+    "hGAjf2BhKcQf39iH/i4f9/9whOuK6iIcKcs8MLCO732i7uDgemzatBFHnjuCUkuL7AhzMDxZwWe+"
+    "+iL+9oObWC/8w4PDmJoPmROoIpSy6aq9TgdRqqJsybAxDJarY1BVD/SMBtNsGZdMBYs4sx7E6Gz1"
+    "8RfvGcRbX7MSn/q3Mzg9Qqfvsvhyn2OthsH1A9iyZbMgAPfM+z5+//feyhWf1hUruAhB4tRa9PD0"
+    "r2bx0XtO4o53DeDrf74VP9w3jf8+uYjpBXqbRHRgaNhSr83YisqwtmUQbdTTzQlSmbL+0I1Dwg22"
+    "FaOtcNrLHi7f2ILrX93FXaJ33PcifnZoRiNPQ6mkT68E7d59PXeWhGEIJ5Y2gkzI1a++BjOzsxzg"
+    "EBcQUL7rYLEao7sth7dfuwpvvLKLtauKvYkFLaUqTz3dbSG6OSRa+uTSlkdQz+gW+z2gtAUxRVWC"
+    "XJlWGjG3FOKpX83hO09OYPRCjeWekZdjiP3zfg57n3ka69atFUrRfmXm69/4JvbsuQ1retaIZkN5"
+    "nuRvU98wvSVCLbS9XQW0t/gCsJSy0zmodCTIykbmD5VnKDM/apDS5KnYwI4MbW9VfdcEAOaXI4xe"
+    "qGNuKUAx56KQI4RNXiOfy3FLz91fugsf/vAfmVdmEqli1YOP/ekn8MUv3oWevl7Z8SEzKqxwaFEg"
+    "CKn4qV6dSx19isFFIiP9m3EULd2ggxR56pK9da4kFRMY+tqBFp2F0E0qRWeI63ouxkbGcPsHbsO9"
+    "996deinUsV+bE+zm4s8+8Un83V3/yG9ellvKuouDToi1ewoh+wVKK+JPVWQV56rX7cxjO4a38RMw"
+    "SV1i/5YlBtKJD26T0RbH4VTZwsIiPvSh2/H3d31B0sR67zGxjKxNhO9893u4886/xrHjz3PhsSQL"
+    "kkrpNTQ6NvNsMu8XGu5Q7auG1e11bFtvz8wib4+z4SflRjEBifGmjRtxxx0fx7vf/a6GgKzpq7N0"
+    "qSwLacwHH3yIg4yjR49jZmaG63D6hJtcqcWtyE+bPltMUsFQ45p2+it76nbJyyYCNXB3tLdjy5Yt"
+    "+N3d1+Ptb38b2tvbde/AS746a1+2nNBFbDR1YQq1qnh5+iWvjLVq6v1lkyNaDxg/QL9MzYOsnEFT"
+    "iMWVL+TR3dWFtra2i+KSAjW5CAEUYOrN65d6Bf3/4qWKJeJVmosHYv8DjcI8ZQfiHFgAAAAASUVO"
+    "RK5CYII="
 )
 
 DEFAULT_SCREENSHOT = os.path.join(BASE_DIR, "Mods", "Screenshots", "default.png")
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "Downloads")
 REBIRTH_DOWNLOAD_PAGE = "https://archive.org/details/rebirthrb338forwin7810"
+# Own GitHub Release assets (allowed — you're downloading your own published files).
+TOOLBOX_RELEASE_BASE = "https://github.com/TomasKrs/ReBirthLauncher/releases/download/ToolBox"
+SCREENSHOTS_PACK_FILENAME = "Rebirth_Launcher_Screenshots.7z"
+SCREENSHOTS_PACK_URL = f"{TOOLBOX_RELEASE_BASE}/{SCREENSHOTS_PACK_FILENAME}"
+PORTABLE_7ZA_FILENAME = "7za.exe"
+PORTABLE_7ZA_URL = f"{TOOLBOX_RELEASE_BASE}/{PORTABLE_7ZA_FILENAME}"
 REBIRTH_EXTRACT_DIR = os.path.join(DOWNLOADS_DIR, "ReBirthPortable")
 
 def normalize_portable_relative_path(relative_path):
@@ -680,26 +834,281 @@ def get_download_catalog(config=None):
 def get_download_file_info(config, file_key):
     return get_download_catalog(config).get(file_key) or {}
 
+def get_downloads_dir(config=None):
+    return resolve_portable_path(
+        ((config or {}).get("directories") or {}).get("downloads", DEFAULT_DIRECTORY_PATHS["downloads"]),
+        config,
+    ) or DOWNLOADS_DIR
+
 def get_rebirth_download_path(file_key, config=None):
+    """Preferred download destination path (configured filename)."""
     info = get_download_file_info(config or {}, file_key)
     filename = (info.get("filename") or "").strip()
     if not filename:
         return None
-    downloads_dir = resolve_portable_path(
-        ((config or {}).get("directories") or {}).get("downloads", DEFAULT_DIRECTORY_PATHS["downloads"]),
-        config,
-    ) or DOWNLOADS_DIR
-    return os.path.join(downloads_dir, filename)
+    return os.path.join(get_downloads_dir(config), filename)
+
+def _download_search_dirs(config=None):
+    dirs = []
+    for path in (get_downloads_dir(config), BASE_DIR):
+        if path and os.path.isdir(path):
+            norm = os.path.abspath(path)
+            if norm not in dirs:
+                dirs.append(norm)
+    return dirs
+
+def file_sha256(path, max_bytes=None):
+    digest = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+            if max_bytes is not None and total >= max_bytes:
+                break
+    return digest.hexdigest()
+
+def file_quick_fingerprint(path):
+    """
+    Fast identity for large files (ISO): size + hash(first 1MB) + hash(last 64KB).
+    Enough to recognize a renamed copy without hashing the whole CD image every time.
+    """
+    size = os.path.getsize(path)
+    head = b""
+    tail = b""
+    with open(path, "rb") as handle:
+        head = handle.read(1024 * 1024)
+        if size > 64 * 1024:
+            handle.seek(max(0, size - 64 * 1024))
+            tail = handle.read(64 * 1024)
+        else:
+            tail = head
+    payload = f"{size}|".encode("ascii") + hashlib.sha256(head).digest() + hashlib.sha256(tail).digest()
+    return {
+        "size": int(size),
+        "quick": hashlib.sha256(payload).hexdigest(),
+        "sha256": None,
+    }
+
+def get_file_fingerprint(path, want_full_hash=False):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    cache_key = os.path.normcase(os.path.abspath(path))
+    cached = _DOWNLOAD_FP_CACHE.get(cache_key)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        fp = dict(cached[2])
+    else:
+        fp = file_quick_fingerprint(path)
+        _DOWNLOAD_FP_CACHE[cache_key] = (st.st_mtime, st.st_size, dict(fp))
+    if want_full_hash and not fp.get("sha256") and st.st_size <= 120 * 1024 * 1024:
+        try:
+            fp["sha256"] = file_sha256(path)
+            _DOWNLOAD_FP_CACHE[cache_key] = (st.st_mtime, st.st_size, dict(fp))
+        except OSError:
+            pass
+    return fp
+
+def _remember_download_fingerprint(config, file_key, path, fingerprint=None):
+    if not config or not path or not os.path.isfile(path):
+        return
+    fp = fingerprint or get_file_fingerprint(path, want_full_hash=(file_key == "installer"))
+    if not fp:
+        return
+    store = config.setdefault("download_fingerprints", {})
+    entry = {
+        "size": int(fp.get("size") or 0),
+        "quick": fp.get("quick") or "",
+        "sha256": fp.get("sha256") or "",
+        "basename": os.path.basename(path),
+    }
+    prev = store.get(file_key) or {}
+    if prev.get("quick") == entry["quick"] and prev.get("size") == entry["size"] and (
+        not entry["sha256"] or prev.get("sha256") == entry["sha256"]
+    ):
+        return
+    store[file_key] = entry
+    try:
+        save_config(config)
+    except Exception:
+        pass
+
+def _fingerprint_matches(saved, path):
+    if not saved or not path or not os.path.isfile(path):
+        return False
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    if int(saved.get("size") or 0) and int(saved.get("size") or 0) != size:
+        return False
+    want_full = bool(saved.get("sha256"))
+    fp = get_file_fingerprint(path, want_full_hash=want_full)
+    if not fp:
+        return False
+    if saved.get("sha256") and fp.get("sha256") and saved["sha256"].lower() == fp["sha256"].lower():
+        return True
+    if saved.get("quick") and fp.get("quick") and saved["quick"].lower() == fp["quick"].lower():
+        return True
+    return False
+
+def _file_contains_ascii(path, needle, max_scan=512 * 1024):
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(max_scan)
+        return needle in data
+    except OSError:
+        return False
+
+def _score_download_candidate(file_key, path):
+    name = os.path.basename(path).lower()
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return -1
+    score = 0
+    if file_key == "iso":
+        if not name.endswith(".iso"):
+            return -1
+        if size < 40 * 1024 * 1024:
+            return -1
+        score += 100
+        if size >= 100 * 1024 * 1024:
+            score += 40
+        for token in ("rebirth", "rb-338", "rb338", "rb 338", "2.01", "2001", "propeller"):
+            if token in name:
+                score += 25
+        # Prefer CD-sized images over tiny stubs
+        score += min(60, size // (10 * 1024 * 1024))
+        return score
+
+    if file_key == "installer":
+        if not name.endswith(".exe"):
+            return -1
+        stem = os.path.splitext(name)[0].replace(" ", "").replace("-", "").replace("_", "")
+        if stem in ("rebirthtoolbox", "7z", "7za", "7zr") or stem.startswith("python"):
+            return -1
+        if size < 1_500_000 or size > 120 * 1024 * 1024:
+            return -1
+        score += 50
+        for token in ("rebirth", "rb-338", "rb338", "2.0.1", "2.01", "installer", "setup"):
+            if token in name:
+                score += 30
+        if _file_contains_ascii(path, b"Inno Setup"):
+            score += 80
+        if _file_contains_ascii(path, b"ReBirth") or _file_contains_ascii(path, b"Rebirth"):
+            score += 40
+        return score
+    return -1
+
+def find_rebirth_download_file(file_key, config=None):
+    """
+    Resolve ISO / installer by:
+      1) exact configured filename
+      2) remembered fingerprint (quick hash / sha256)
+      3) known SHA-256 catalog (if filled)
+      4) heuristic scan of Downloads + ToolBox root (any sensible name)
+    """
+    config = config or {}
+    preferred = get_rebirth_download_path(file_key, config)
+    if preferred and os.path.isfile(preferred):
+        _remember_download_fingerprint(config, file_key, preferred)
+        return os.path.abspath(preferred), "filename"
+
+    saved_fp = ((config.get("download_fingerprints") or {}).get(file_key)) or {}
+    known = list(KNOWN_DOWNLOAD_SIGNATURES.get(file_key) or [])
+
+    candidates = []
+    for folder in _download_search_dirs(config):
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(folder, name)
+            if not os.path.isfile(path):
+                continue
+            lower = name.lower()
+            if file_key == "iso" and not lower.endswith(".iso"):
+                continue
+            if file_key == "installer" and not lower.endswith(".exe"):
+                continue
+            candidates.append(os.path.abspath(path))
+
+    # Fingerprint match (renamed file we already accepted once)
+    for path in candidates:
+        if _fingerprint_matches(saved_fp, path):
+            return path, "fingerprint"
+
+    # Known catalog (sha256 for smaller files, or size+quick fingerprint for ISOs)
+    for path in candidates:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        fp = None
+        for entry in known:
+            want_sha = (entry.get("sha256") or "").lower()
+            want_quick = (entry.get("quick") or "").lower()
+            want_size = int(entry.get("size") or 0)
+            if want_size and want_size != size:
+                continue
+            if want_sha:
+                if size > 120 * 1024 * 1024:
+                    continue
+                try:
+                    digest = file_sha256(path)
+                except OSError:
+                    continue
+                if digest.lower() != want_sha:
+                    continue
+                _remember_download_fingerprint(
+                    config,
+                    file_key,
+                    path,
+                    {"size": size, "quick": "", "sha256": digest},
+                )
+                return path, "sha256"
+            if want_quick:
+                if fp is None:
+                    fp = get_file_fingerprint(path, want_full_hash=False)
+                if fp and (fp.get("quick") or "").lower() == want_quick:
+                    _remember_download_fingerprint(config, file_key, path, fp)
+                    return path, "fingerprint"
+            elif want_size and not want_sha and not want_quick:
+                # size-only known entry (weak) — still accept if unique-ish
+                _remember_download_fingerprint(config, file_key, path)
+                return path, "size"
+
+    # Heuristic best match
+    ranked = []
+    for path in candidates:
+        score = _score_download_candidate(file_key, path)
+        if score > 0:
+            ranked.append((score, path))
+    if ranked:
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        best = ranked[0][1]
+        _remember_download_fingerprint(config, file_key, best)
+        return best, "heuristic"
+
+    return None, None
 
 def scan_rebirth_download_status(config=None):
     config = config or {}
-    iso_path = get_rebirth_download_path("iso", config)
-    installer_path = get_rebirth_download_path("installer", config)
+    iso_path, iso_how = find_rebirth_download_file("iso", config)
+    installer_path, inst_how = find_rebirth_download_file("installer", config)
     return {
-        "iso_ready": bool(iso_path and os.path.exists(iso_path)),
-        "installer_ready": bool(installer_path and os.path.exists(installer_path)),
-        "iso_path": iso_path if iso_path and os.path.exists(iso_path) else None,
-        "installer_path": installer_path if installer_path and os.path.exists(installer_path) else None,
+        "iso_ready": bool(iso_path),
+        "installer_ready": bool(installer_path),
+        "iso_path": iso_path,
+        "installer_path": installer_path,
+        "iso_match": iso_how,
+        "installer_match": inst_how,
     }
 
 def validate_https_download_url(url):
@@ -723,15 +1132,132 @@ def find_rebirth_exe_in_dir(base_dir):
     return None
 
 def find_seven_zip_executable():
-    for candidate in (
+    """Locate 7-Zip / 7za (system install, ToolBox folder, or PyInstaller bundle)."""
+    candidates = [
+        os.path.join(BASE_DIR, "7za.exe"),
         os.path.join(BASE_DIR, "7z.exe"),
+        os.path.join(BASE_DIR, "tools", "7za.exe"),
         os.path.join(BASE_DIR, "7-Zip", "7z.exe"),
+        os.path.join(BASE_DIR, "7-Zip", "7za.exe"),
         r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files\7-Zip\7za.exe",
         r"C:\Program Files (x86)\7-Zip\7z.exe",
-    ):
-        if candidate and os.path.exists(candidate):
+        r"C:\Program Files (x86)\7-Zip\7za.exe",
+    ]
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates[0:0] = [
+                os.path.join(meipass, "7za.exe"),
+                os.path.join(meipass, "7z.exe"),
+            ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
             return candidate
     return None
+
+def ensure_seven_zip_available(progress_callback=None):
+    """
+    Return path to 7z/7za. If missing, try downloading portable 7za.exe from the
+    ToolBox GitHub release into the ToolBox folder (LGPL — ship License note in README).
+    """
+    existing = find_seven_zip_executable()
+    if existing:
+        return existing, None
+    dest = os.path.join(BASE_DIR, PORTABLE_7ZA_FILENAME)
+    try:
+        if progress_callback:
+            progress_callback("Downloading portable 7za.exe…")
+        download_file_with_progress(PORTABLE_7ZA_URL, dest, timeout=180)
+        if os.path.isfile(dest) and os.path.getsize(dest) > 50_000:
+            return dest, None
+        return None, "Downloaded 7za.exe looks invalid."
+    except Exception as exc:
+        return None, (
+            "7-Zip was not found and portable 7za.exe could not be downloaded.\n\n"
+            f"• Install 7-Zip from https://www.7-zip.org/\n"
+            f"• Or copy 7za.exe next to ToolBox\n"
+            f"• Or upload 7za.exe to your ToolBox GitHub release\n\n"
+            f"Detail: {exc}"
+        )
+
+def run_seven_zip_extract(archive_path, dest_dir, seven_zip=None):
+    seven_zip = seven_zip or find_seven_zip_executable()
+    if not seven_zip:
+        return False, "7-Zip / 7za.exe not found."
+    os.makedirs(dest_dir, exist_ok=True)
+    kwargs = {
+        "args": [seven_zip, "x", archive_path, f"-o{dest_dir}", "-y", "-aoa"],
+        "capture_output": True,
+        "text": True,
+    }
+    creationflags = get_subprocess_creationflags()
+    if creationflags:
+        kwargs["creationflags"] = creationflags
+    result = subprocess.run(**kwargs)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return False, detail or "7-Zip extract failed."
+    return True, None
+
+def find_screenshots_pack_archive(config=None):
+    """Find Rebirth_Launcher_Screenshots.7z in Downloads or next to ToolBox."""
+    names = (
+        SCREENSHOTS_PACK_FILENAME,
+        SCREENSHOTS_PACK_FILENAME.lower(),
+        "Rebirth_Launcher_Screenshots.7z",
+    )
+    search_dirs = []
+    for folder in (get_downloads_dir(config), BASE_DIR):
+        if folder and os.path.isdir(folder):
+            norm = os.path.abspath(folder)
+            if norm not in search_dirs:
+                search_dirs.append(norm)
+    for folder in search_dirs:
+        for name in names:
+            path = os.path.join(folder, name)
+            if os.path.isfile(path):
+                return os.path.abspath(path)
+        try:
+            for entry in os.listdir(folder):
+                lower = entry.lower()
+                if lower.endswith(".7z") and "screenshot" in lower:
+                    return os.path.abspath(os.path.join(folder, entry))
+        except OSError:
+            pass
+    return None
+
+def mod_screenshots_look_populated():
+    shots = os.path.join(MODS_DIR, "Screenshots")
+    if not os.path.isdir(shots):
+        return False
+    try:
+        for name in os.listdir(shots):
+            if name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif")):
+                return True
+    except OSError:
+        pass
+    return False
+
+def extract_screenshots_pack_to_mods(archive_path, seven_zip=None):
+    """Unpack screenshot pack into Mods/ (expects Screenshots/ inside the archive)."""
+    if not archive_path or not os.path.isfile(archive_path):
+        return False, "Screenshot pack not found."
+    os.makedirs(MODS_DIR, exist_ok=True)
+    ok, err = run_seven_zip_extract(archive_path, MODS_DIR, seven_zip=seven_zip)
+    if not ok:
+        return False, err
+    # If archive was flat images, also try extracting into Screenshots/
+    if not mod_screenshots_look_populated():
+        shots = os.path.join(MODS_DIR, "Screenshots")
+        ok2, err2 = run_seven_zip_extract(archive_path, shots, seven_zip=seven_zip)
+        if not ok2 and not mod_screenshots_look_populated():
+            return False, err2 or "Archive extracted but no screenshot images were found."
+    try:
+        invalidate_mod_screenshot_index_cache()
+    except Exception:
+        pass
+    return True, os.path.join(MODS_DIR, "Screenshots")
 
 def normalize_mod_name_key(name):
     return (name or "Standard ReBirth").strip().lower()
@@ -863,25 +1389,15 @@ def extract_rebirth_installer(installer_path, dest_dir):
     Does NOT run the installer — unzip only, into the ToolBox folder.
     """
     os.makedirs(dest_dir, exist_ok=True)
-    seven_zip = find_seven_zip_executable()
+    seven_zip, err = ensure_seven_zip_available()
     if not seven_zip:
-        return False, None, (
-            "7-Zip (7z.exe) was not found.\n\n"
-            "Install 7-Zip from https://www.7-zip.org/ or copy 7z.exe into the ToolBox folder,\n"
-            "then click Extract again. The installer EXE is only unpacked — never launched."
+        return False, None, err or (
+            "7-Zip / 7za.exe was not found.\n\n"
+            "Install 7-Zip, copy 7za.exe next to ToolBox, or publish 7za.exe on the ToolBox GitHub release."
         )
 
-    kwargs = {
-        "args": [seven_zip, "x", installer_path, f"-o{dest_dir}", "-y", "-aoa"],
-        "capture_output": True,
-        "text": True,
-    }
-    creationflags = get_subprocess_creationflags()
-    if creationflags:
-        kwargs["creationflags"] = creationflags
-    result = subprocess.run(**kwargs)
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
+    ok, detail = run_seven_zip_extract(installer_path, dest_dir, seven_zip=seven_zip)
+    if not ok:
         return False, None, detail or "7-Zip could not unpack the installer EXE."
 
     rebirth_exe = find_rebirth_exe_in_dir(dest_dir)
@@ -1239,6 +1755,12 @@ def document_type_label(ext):
         ".csv": "CSV",
         ".xml": "XML",
         ".rtf": "RTF",
+        ".docx": "DOCX",
+        ".doc": "DOC",
+        ".odt": "ODT",
+        ".xlsx": "XLSX",
+        ".xls": "XLS",
+        ".ods": "ODS",
         ".png": "IMAGE",
         ".jpg": "IMAGE",
         ".jpeg": "IMAGE",
@@ -1327,28 +1849,45 @@ def make_text_preview_photo(file_path, max_w, max_h, bg="#242736", fg="#A0A5C0",
     except Exception:
         return None
 
-def scan_documents_folder(documents_dir=None):
-    root_dir = documents_dir or DOCUMENTS_DIR
+def scan_documents_folder(documents_dir=None, allowed_exts=None):
+    """Scan ToolBox root (or given folder) recursively for document-like files."""
+    root_dir = documents_dir or BASE_DIR
     if not root_dir or not os.path.isdir(root_dir):
         return []
+    if allowed_exts is None:
+        allowed_exts = DOCUMENT_BROWSE_EXTENSIONS
+    else:
+        allowed_exts = {str(ext).lower() for ext in allowed_exts}
     files = []
-    for current_root, dirnames, filenames in os.walk(root_dir):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+    root_abs = os.path.abspath(root_dir)
+    for current_root, dirnames, filenames in os.walk(root_abs):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in DOCUMENT_SCAN_SKIP_DIRS and not d.startswith(".")
+        ]
         for filename in filenames:
             if filename.startswith("."):
+                continue
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in allowed_exts:
+                continue
+            if filename.lower() in DOCUMENT_SCAN_SKIP_FILES:
                 continue
             full_path = os.path.join(current_root, filename)
             try:
                 stat = os.stat(full_path)
             except OSError:
                 continue
-            rel_path = os.path.relpath(full_path, root_dir).replace("\\", "/")
+            # Skip huge binaries accidentally matching (e.g. misnamed)
+            if stat.st_size > 80 * 1024 * 1024:
+                continue
+            rel_path = os.path.relpath(full_path, root_abs).replace("\\", "/")
             files.append(
                 {
                     "path": full_path,
                     "rel_path": rel_path,
                     "name": filename,
-                    "ext": os.path.splitext(filename)[1].lower(),
+                    "ext": ext,
                     "size": stat.st_size,
                     "modified": stat.st_mtime,
                 }
@@ -1441,6 +1980,7 @@ def load_config():
             key: {"url": "", "filename": info.get("filename", "")}
             for key, info in DEFAULT_DOWNLOAD_CATALOG.items()
         },
+        "download_fingerprints": {},
         "tutorial_completed_steps": [],
         "tutorial_last_step_id": "welcome",
         "mod_favorites": [],
@@ -1466,6 +2006,7 @@ def load_config():
     for dir_key, dir_val in DEFAULT_DIRECTORY_PATHS.items():
         cfg["directories"].setdefault(dir_key, dir_val)
     cfg.setdefault("download_urls", {})
+    cfg.setdefault("download_fingerprints", {})
     for dl_key, dl_info in DEFAULT_DOWNLOAD_CATALOG.items():
         cfg["download_urls"].setdefault(dl_key, {})
         cfg["download_urls"][dl_key].setdefault("url", "")
@@ -1628,11 +2169,58 @@ def is_303_step_active(note_val, flags):
         return True
     return False
 
+def _find_app_icon_files():
+    """Return (ico_path, png_path) searching install dir and PyInstaller bundle."""
+    roots = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        roots.append(sys._MEIPASS)
+    roots.append(BASE_DIR)
+    roots.append(os.path.dirname(os.path.abspath(__file__)))
+    ico_path = png_path = None
+    seen = set()
+    for root in roots:
+        if not root:
+            continue
+        key = os.path.normcase(os.path.abspath(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        ico = os.path.join(root, "rebirth_toolbox_icon.ico")
+        png = os.path.join(root, "rebirth_toolbox_icon.png")
+        if ico_path is None and os.path.isfile(ico):
+            ico_path = ico
+        if png_path is None and os.path.isfile(png):
+            png_path = png
+        if ico_path and png_path:
+            break
+    return ico_path, png_path
+
 def set_window_icon(window):
     try:
-        icon_img = tk.PhotoImage(data=APP_ICON_BASE64)
-        window.iconphoto(True, icon_img)
-        window._app_icon_ref = icon_img
+        ico_path, png_path = _find_app_icon_files()
+        if ico_path and os.name == "nt":
+            try:
+                window.iconbitmap(default=ico_path)
+            except Exception:
+                try:
+                    window.iconbitmap(ico_path)
+                except Exception:
+                    pass
+        photo = None
+        if png_path and HAS_PIL:
+            try:
+                img = Image.open(png_path).convert("RGBA")
+                if max(img.size) > 64:
+                    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+                    img = img.resize((64, 64), resample)
+                photo = ImageTk.PhotoImage(img)
+            except Exception:
+                photo = None
+        if photo is None and APP_ICON_BASE64:
+            photo = tk.PhotoImage(data=APP_ICON_BASE64)
+        if photo is not None:
+            window.iconphoto(True, photo)
+            window._app_icon_ref = photo
     except Exception:
         pass
 
@@ -7394,8 +7982,8 @@ class ModernRebirthStudioToolBox:
     def __init__(self, root):
         self.root = root
         self.root.title("ReBirth ToolBox")
-        self.root.geometry("920x900")
-        self.root.minsize(920, 780)
+        self.root.geometry(f"{WINDOW_START_WIDTH}x{WINDOW_START_HEIGHT}")
+        self.root.minsize(WINDOW_START_WIDTH, 780)
         self.root.resizable(True, True)
         self.root.configure(bg="#12131A")
 
@@ -7431,6 +8019,10 @@ class ModernRebirthStudioToolBox:
         self.selected_startup_song_path = None
         self.browsed_startup_song = None
         self._install_restart_prompted = False
+        self._post_install_dialog_shown = False
+        self._prompt_restart_busy = False
+        self._extract_in_progress = False
+        self._restart_prompt_after_id = None
         self.startup_song_tiles = {}
         self.startup_tile_photos = []
         self.mod_songs_index = {}
@@ -7531,7 +8123,11 @@ class ModernRebirthStudioToolBox:
         if hasattr(self, "header_canvas"):
             self.header_canvas.config(bg=p["bg_root"])
             self.header_canvas.delete("all")
-            self.draw_synth_header(self.header_canvas, p)
+            try:
+                hdr_w = int(self.header_canvas.winfo_width() or CONTENT_DESIGN_WIDTH)
+            except Exception:
+                hdr_w = CONTENT_DESIGN_WIDTH
+            self.draw_synth_header(self.header_canvas, p, width=max(hdr_w, 400))
         if hasattr(self, "start_info_card"):
             self.start_info_card.config(bg=p["bg_card"], highlightbackground=p["border"])
         if hasattr(self, "settings_btn_bar"):
@@ -7714,10 +8310,12 @@ class ModernRebirthStudioToolBox:
         self.root.option_add("*TCombobox*Listbox.selectBackground", p["select_bg"])
         self.root.option_add("*TCombobox*Listbox.selectForeground", p["accent_cyan"])
 
-    def draw_synth_header(self, canvas, palette=None):
+    def draw_synth_header(self, canvas, palette=None, width=None):
         p = palette or self._palette
-        canvas.create_rectangle(0, 0, 920, 110, fill=p["bg_header"], outline=p["header_outline"], width=2)
-        screws = [(15, 15), (905, 15), (15, 95), (905, 95)]
+        w = int(width or CONTENT_DESIGN_WIDTH)
+        canvas.delete("all")
+        canvas.create_rectangle(0, 0, w, 110, fill=p["bg_header"], outline=p["header_outline"], width=2)
+        screws = [(15, 15), (w - 15, 15), (15, 95), (w - 15, 95)]
         for sx, sy in screws:
             canvas.create_oval(sx - 5, sy - 5, sx + 5, sy + 5, fill=p["header_screw"], outline=p["border"], width=1)
             canvas.create_line(sx - 3, sy - 3, sx + 3, sy + 3, fill=p["bg_root"], width=1.5)
@@ -7734,14 +8332,41 @@ class ModernRebirthStudioToolBox:
                 width=2,
             )
 
-        canvas.create_text(400, 38, text="REBIRTH TOOLBOX", font=("Segoe UI", 18, "bold"), fill=p["accent_cyan"])
-        canvas.create_text(400, 62, text="LAUNCH · MODS · SONG LIBRARY · INSPIRE ME", font=("Segoe UI", 8, "bold"), fill=p["accent_orange"])
-        canvas.create_line(20, 104, 900, 104, fill=p["accent_cyan"], width=1)
-        canvas.create_line(20, 106, 900, 106, fill=p["border"], width=1)
+        cx = w // 2
+        canvas.create_text(cx, 38, text="REBIRTH TOOLBOX", font=("Segoe UI", 18, "bold"), fill=p["accent_cyan"])
+        canvas.create_text(cx, 62, text="LAUNCH · MODS · SONG LIBRARY · INSPIRE ME", font=("Segoe UI", 8, "bold"), fill=p["accent_orange"])
+        canvas.create_line(20, 104, w - 20, 104, fill=p["accent_cyan"], width=1)
+        canvas.create_line(20, 106, w - 20, 106, fill=p["border"], width=1)
+
+    def _layout_centered_content(self, event=None):
+        """Keep UI at design width and center it when the window is wider (maximize-safe)."""
+        try:
+            if event is not None and getattr(event, "widget", None) is not self.root:
+                return
+            rw = max(1, int(self.root.winfo_width()))
+            rh = max(1, int(self.root.winfo_height()))
+            cw = min(CONTENT_DESIGN_WIDTH, rw)
+            x = max(0, (rw - cw) // 2)
+            key = (cw, rh, x)
+            if key == getattr(self, "_content_layout_key", None):
+                return
+            prev = getattr(self, "_content_layout_key", None)
+            self._content_layout_key = key
+            self._content_column.place(x=x, y=0, width=cw, height=rh)
+            if hasattr(self, "header_canvas") and (prev is None or prev[0] != cw):
+                self.header_canvas.configure(width=cw)
+                self.draw_synth_header(self.header_canvas, width=cw)
+        except Exception:
+            pass
 
     def build_ui(self):
+        # Centered fixed-width column: avoids huge empty gaps when maximized.
+        self._content_column = tk.Frame(self.root, bg="#12131A", width=CONTENT_DESIGN_WIDTH)
+        self.root.bind("<Configure>", self._layout_centered_content, add="+")
+        self.root.after_idle(self._layout_centered_content)
+
         self.lbl_footer = tk.Label(
-            self.root,
+            self._content_column,
             text="Autor: Tomas Krsko    |    Programmed by: AI",
             font=("Segoe UI", 8),
             fg="#6C7293",
@@ -7749,11 +8374,11 @@ class ModernRebirthStudioToolBox:
         )
         self.lbl_footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 6))
 
-        self.header_canvas = tk.Canvas(self.root, width=920, height=110, bg="#12131A", highlightthickness=0)
+        self.header_canvas = tk.Canvas(self._content_column, width=CONTENT_DESIGN_WIDTH, height=110, bg="#12131A", highlightthickness=0)
         self.header_canvas.pack(fill=tk.X)
-        self.draw_synth_header(self.header_canvas)
+        self.draw_synth_header(self.header_canvas, width=CONTENT_DESIGN_WIDTH)
 
-        main_container = tk.Frame(self.root, bg="#12131A")
+        main_container = tk.Frame(self._content_column, bg="#12131A")
         main_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=10)
 
         self.notebook = ttk.Notebook(main_container)
@@ -8250,13 +8875,14 @@ class ModernRebirthStudioToolBox:
         editor_row.pack(fill=tk.BOTH, expand=True)
 
         editor_left_panel = tk.Frame(editor_row, bg="#12131A")
-        editor_left_panel.pack(side=tk.LEFT, padx=(0, 6))
+        editor_left_panel.pack(side=tk.LEFT, padx=(0, 6), anchor="n")
 
         editor_center = tk.Frame(editor_row, bg="#12131A")
         editor_center.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
+        # Pack Copy panel as LEFT (next to sequencer), not RIGHT — avoids a huge empty gap when maximized.
         editor_right_panel = tk.Frame(editor_row, bg="#12131A")
-        editor_right_panel.pack(side=tk.RIGHT, padx=(6, 0))
+        editor_right_panel.pack(side=tk.LEFT, padx=(6, 0), anchor="n")
 
         self.pattern_selector = ReBirthPatternSelector(editor_left_panel, compact=True, on_change=lambda _s: self.on_pat_slot_changed())
         self.lbl_pattern_selector_ctx = tk.Label(
@@ -8448,6 +9074,16 @@ class ModernRebirthStudioToolBox:
         tk.Label(doc_header, text="TOOLBOX DOCUMENTS", font=("Segoe UI", 8, "bold"), fg="#A0A5C0", bg="#1A1C27").pack(side=tk.LEFT)
         tk.Button(
             doc_header,
+            text="📂 Open Folder",
+            font=("Segoe UI", 8, "bold"),
+            fg="#FF9500",
+            bg="#242736",
+            bd=0,
+            cursor="hand2",
+            command=self.open_documents_folder,
+        ).pack(side=tk.RIGHT, padx=(6, 0), ipadx=8, ipady=2)
+        tk.Button(
+            doc_header,
             text="↻ Refresh",
             font=("Segoe UI", 8, "bold"),
             fg="#00E5FF",
@@ -8465,7 +9101,28 @@ class ModernRebirthStudioToolBox:
             bg="#1A1C27",
             anchor="w",
         )
-        self.lbl_documents_path.pack(fill=tk.X, padx=12, pady=(0, 4))
+        self.lbl_documents_path.pack(fill=tk.X, padx=12, pady=(0, 2))
+
+        doc_filter_row = tk.Frame(tab_documents, bg="#1A1C27")
+        doc_filter_row.pack(fill=tk.X, padx=12, pady=(0, 4))
+        tk.Label(doc_filter_row, text="Filter:", font=("Segoe UI", 8, "bold"), fg="#A0A5C0", bg="#1A1C27").pack(side=tk.LEFT, padx=(0, 6))
+        self.document_filter_vars = {}
+        for filter_name, _exts in DOCUMENT_FILTER_DEFS:
+            var = tk.BooleanVar(value=True)
+            self.document_filter_vars[filter_name] = var
+            tk.Checkbutton(
+                doc_filter_row,
+                text=filter_name,
+                variable=var,
+                font=("Segoe UI", 8, "bold"),
+                fg="#FFFFFF",
+                bg="#1A1C27",
+                selectcolor="#1F2230",
+                activebackground="#1A1C27",
+                activeforeground="#00E5FF",
+                cursor="hand2",
+                command=self.refresh_documents_gallery,
+            ).pack(side=tk.LEFT, padx=(0, 8))
 
         doc_gallery_wrap = tk.Frame(tab_documents, bg="#1A1C27")
         doc_gallery_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
@@ -8973,7 +9630,7 @@ class ModernRebirthStudioToolBox:
         wizard_steps = [
             ("1", "Download", "#00FF66"),
             ("2", "Extract", "#FF9500"),
-            ("3", "Restart", "#00E5FF"),
+            ("3", "Finish", "#00E5FF"),
         ]
         for index, (num, title, accent) in enumerate(wizard_steps):
             step_col = tk.Frame(progress_row, bg="#12131A")
@@ -9147,17 +9804,39 @@ class ModernRebirthStudioToolBox:
         self.btn_extract_rebirth = None
 
         tk.Label(self.step3_card, text="STEP 3", font=("Segoe UI", 8, "bold"), fg="#00E5FF", bg="#12131A", anchor="w").pack(fill=tk.X, padx=10, pady=(10, 2))
-        tk.Label(self.step3_card, text="Restart ToolBox", font=("Segoe UI", 10, "bold"), fg="#FFFFFF", bg="#12131A", anchor="w").pack(fill=tk.X, padx=10, pady=(0, 4))
+        tk.Label(self.step3_card, text="Screenshots + Restart", font=("Segoe UI", 10, "bold"), fg="#FFFFFF", bg="#12131A", anchor="w").pack(fill=tk.X, padx=10, pady=(0, 4))
         tk.Label(
             self.step3_card,
-            text="After Rebirth.exe appears in this folder, restart ToolBox to unlock all tabs.",
+            text="Optional: download mod screenshots into Mods/. Then restart ToolBox to unlock tabs.",
             font=("Segoe UI", 8),
             fg="#6C7293",
             bg="#12131A",
             anchor="w",
             wraplength=240,
             justify=tk.LEFT,
-        ).pack(fill=tk.X, padx=10, pady=(0, 8))
+        ).pack(fill=tk.X, padx=10, pady=(0, 6))
+        self.lbl_step3_screenshots = tk.Label(
+            self.step3_card,
+            text="Screenshots: …",
+            font=("Segoe UI", 8),
+            fg="#A0A5C0",
+            bg="#12131A",
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=240,
+        )
+        self.lbl_step3_screenshots.pack(fill=tk.X, padx=10, pady=(0, 6))
+        self.btn_screenshots_pack = tk.Button(
+            self.step3_card,
+            text="🖼 Get mod screenshots",
+            font=("Segoe UI", 8, "bold"),
+            fg="#FFFFFF",
+            bg="#242736",
+            bd=0,
+            cursor="hand2",
+            command=self.download_or_extract_screenshots_pack,
+        )
+        self.btn_screenshots_pack.pack(fill=tk.X, padx=10, ipady=5, pady=(0, 8))
         self.lbl_step3_status = tk.Label(
             self.step3_card,
             text="Complete Step 2 first.",
@@ -10241,22 +10920,36 @@ class ModernRebirthStudioToolBox:
         apply_config_paths(self.config)
         status = scan_rebirth_download_status(self.config)
         catalog = get_download_catalog(self.config)
-        lines = [f"Downloads folder: {DOWNLOADS_DIR}", ""]
+        lines = [
+            f"Downloads folder: {DOWNLOADS_DIR}",
+            "Files are recognized by name, fingerprint, or content — exact filename is optional.",
+            "",
+        ]
         checks = (
-            ("iso", "ReBirth ISO", status["iso_ready"], catalog["iso"]),
-            ("installer", "ReBirth RB-338 2.0.1 Installer", status["installer_ready"], catalog["installer"]),
+            ("iso", "ReBirth ISO", status["iso_ready"], status.get("iso_path"), status.get("iso_match"), catalog["iso"]),
+            (
+                "installer",
+                "ReBirth RB-338 2.0.1 Installer",
+                status["installer_ready"],
+                status.get("installer_path"),
+                status.get("installer_match"),
+                catalog["installer"],
+            ),
         )
         missing = []
-        for _key, label, ready, info in checks:
-            filename = info.get("filename", "?")
+        for _key, label, ready, path, how, info in checks:
+            preferred = info.get("filename", "?")
             url = (info.get("url") or "").strip()
-            if ready:
-                lines.append(f"✔ {label}: {filename}")
+            if ready and path:
+                found = os.path.basename(path)
+                tag = how or "filename"
+                extra = "" if found.lower() == (preferred or "").lower() else f" (preferred name was “{preferred}”)"
+                lines.append(f"✔ {label}: {found} · matched by {tag}{extra}")
             else:
-                hint = "configure https URL in Settings or copy manually to Downloads"
+                hint = "put any matching *.iso / ReBirth *.exe into Downloads"
                 if not url:
-                    hint = "no URL configured — copy manually to Downloads"
-                lines.append(f"✖ {label}: {filename} ({hint})")
+                    hint = "no URL configured — copy the file manually into Downloads"
+                lines.append(f"✖ {label}: not found · looking for ~ “{preferred}” ({hint})")
                 if _key in ("iso", "installer"):
                     missing.append(label)
         text = "\n".join(lines)
@@ -10349,13 +11042,12 @@ class ModernRebirthStudioToolBox:
         self.on_song_selected()
 
     def open_documents_folder(self):
-        results = ensure_all_config_directories(self.config)
-        doc_info = results.get("documents") or {}
-        if not doc_info.get("ok"):
-            messagebox.showerror("Documents Folder", doc_info.get("error") or "Documents folder is not available.")
+        folder = BASE_DIR if os.path.isdir(BASE_DIR) else DOCUMENTS_DIR
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Documents Folder", "ToolBox folder is not available.")
             return
         try:
-            os.startfile(DOCUMENTS_DIR)
+            os.startfile(folder)
         except Exception as exc:
             messagebox.showerror("Documents Folder", f"Could not open folder:\n{exc}")
 
@@ -10412,6 +11104,21 @@ class ModernRebirthStudioToolBox:
         except Exception as exc:
             messagebox.showerror("Open Document", f"Could not open file:\n{exc}")
 
+    def _selected_document_extensions(self):
+        selected = set()
+        filter_map = {name: exts for name, exts in DOCUMENT_FILTER_DEFS}
+        vars_map = getattr(self, "document_filter_vars", None) or {}
+        if not vars_map:
+            return set(DOCUMENT_BROWSE_EXTENSIONS)
+        for name, var in vars_map.items():
+            try:
+                enabled = bool(var.get())
+            except Exception:
+                enabled = True
+            if enabled:
+                selected.update(filter_map.get(name) or ())
+        return selected
+
     def refresh_documents_gallery(self):
         if not hasattr(self, "doc_tiles_frame"):
             return
@@ -10421,35 +11128,51 @@ class ModernRebirthStudioToolBox:
         self.document_tiles.clear()
         self.document_tile_photos.clear()
 
-        results = ensure_all_config_directories(self.config)
-        doc_info = results.get("documents") or {}
-        rel = (self.config.get("directories") or {}).get("documents", DEFAULT_DIRECTORY_PATHS["documents"])
-        if not doc_info.get("ok"):
-            err = doc_info.get("error") or "Documents folder is not available"
-            self.lbl_documents_path.config(text=f"✖ ./{rel} — {err}", fg="#FF453A")
+        if not os.path.isdir(BASE_DIR):
+            self.lbl_documents_path.config(text="✖ ToolBox folder is not available", fg="#FF453A")
             self.lbl_documents_detail.config(
-                text="Fix the documents folder path in Settings → TOOLBOX FOLDERS.",
+                text="Could not resolve the ToolBox install folder.",
                 fg="#FF9500",
             )
             tk.Label(
                 self.doc_tiles_frame,
-                text="Documents folder could not be created.",
+                text="ToolBox folder could not be opened.",
                 font=("Segoe UI", 10, "italic"),
                 fg="#FF453A",
                 bg="#12131A",
             ).grid(row=0, column=0, padx=12, pady=20, sticky="w")
             return
 
-        self.lbl_documents_path.config(text=f"Folder: ./{rel}   ({DOCUMENTS_DIR})", fg="#6C7293")
-        self.document_files = scan_documents_folder(DOCUMENTS_DIR)
+        allowed = self._selected_document_extensions()
+        self.lbl_documents_path.config(
+            text=f"Scanning ToolBox folder + subfolders:  {BASE_DIR}",
+            fg="#6C7293",
+        )
+        if not allowed:
+            self.document_files = []
+            self.lbl_documents_detail.config(
+                text="No file types selected. Enable at least one filter (PDF, TXT, HTML, DOCX, XLSX, Other text).",
+                fg="#FF9500",
+            )
+            tk.Label(
+                self.doc_tiles_frame,
+                text="Select at least one filter above.",
+                font=("Segoe UI", 10, "italic"),
+                fg="#6C7293",
+                bg="#12131A",
+                justify=tk.LEFT,
+            ).pack(padx=12, pady=20, anchor="w")
+            return
+
+        self.document_files = scan_documents_folder(BASE_DIR, allowed_exts=allowed)
         if not self.document_files:
             self.lbl_documents_detail.config(
-                text="No documents yet. Copy manuals, notes, screenshots, or other files into the Documents folder shown above.",
+                text="No matching documents found. Manuals next to the ToolBox, PDFs in Documents/, HTML tips, etc. are included when filters match.",
                 fg="#6C7293",
             )
             tk.Label(
                 self.doc_tiles_frame,
-                text="No documents found in the configured Documents folder.",
+                text="No documents found for the selected filters.",
                 font=("Segoe UI", 10, "italic"),
                 fg="#6C7293",
                 bg="#12131A",
@@ -12648,10 +13371,8 @@ class ModernRebirthStudioToolBox:
 
             _install_root, rebirth_exe = resolve_rebirth_install_root(self.config)
             if rebirth_exe or is_rebirth_exe_ready():
+                # UI only — never open ISO/restart popups from the poll (that caused duplicates).
                 self.refresh_get_rebirth_ui()
-                if self.setup_wizard_only and not getattr(self, "_install_restart_prompted", False):
-                    self._install_restart_prompted = True
-                    self.root.after(400, self.prompt_restart_after_install)
                 return
 
             self._rebirth_poll_id = self.root.after(3000, tick)
@@ -12666,6 +13387,13 @@ class ModernRebirthStudioToolBox:
             except Exception:
                 pass
         self._rebirth_poll_id = None
+        pending = getattr(self, "_restart_prompt_after_id", None)
+        if pending:
+            try:
+                self.root.after_cancel(pending)
+            except Exception:
+                pass
+        self._restart_prompt_after_id = None
 
     def set_wizard_message(self, text, color="#A0A5C0"):
         if hasattr(self, "lbl_wizard_message"):
@@ -12697,14 +13425,26 @@ class ModernRebirthStudioToolBox:
         inst_info = get_download_file_info(self.config, "installer")
 
         if status["iso_ready"]:
-            self.lbl_step1_iso.config(text=f"✔ ISO ready ({iso_info.get('filename', '')})", fg="#00FF66")
+            iso_name = os.path.basename(status["iso_path"]) if status.get("iso_path") else iso_info.get("filename", "")
+            how = status.get("iso_match") or "filename"
+            tag = "" if how == "filename" else f" · matched by {how}"
+            self.lbl_step1_iso.config(text=f"✔ ISO ready ({iso_name}{tag})", fg="#00FF66")
         else:
-            self.lbl_step1_iso.config(text=f"✖ ISO missing ({iso_info.get('filename', '')})", fg="#FF9500")
+            self.lbl_step1_iso.config(
+                text=f"✖ ISO missing (any *.iso in Downloads — name can differ)",
+                fg="#FF9500",
+            )
 
         if status["installer_ready"]:
-            self.lbl_step1_installer.config(text=f"✔ Installer ready ({inst_info.get('filename', '')})", fg="#00FF66")
+            inst_name = os.path.basename(status["installer_path"]) if status.get("installer_path") else inst_info.get("filename", "")
+            how = status.get("installer_match") or "filename"
+            tag = "" if how == "filename" else f" · matched by {how}"
+            self.lbl_step1_installer.config(text=f"✔ Installer ready ({inst_name}{tag})", fg="#00FF66")
         else:
-            self.lbl_step1_installer.config(text=f"✖ Installer missing ({inst_info.get('filename', '')})", fg="#FF9500")
+            self.lbl_step1_installer.config(
+                text=f"✖ Installer missing (ReBirth *.exe in Downloads — name can differ)",
+                fg="#FF9500",
+            )
 
         protected_buttons = (
             self.btn_download_iso,
@@ -12755,12 +13495,18 @@ class ModernRebirthStudioToolBox:
             )
 
         step3_done = step2_done and not self.setup_wizard_only
+        # Mod screenshots pack (GitHub release) — auto-extract if already downloaded.
+        self._refresh_step3_screenshots_status(auto_extract=True)
         if step2_done:
             self.lbl_step3_status.config(text="Ready — restart ToolBox to unlock all tabs.", fg="#00E5FF")
             self.btn_deploy_launcher.config(state=tk.NORMAL, text="↻ Restart ToolBox")
         else:
             self.lbl_step3_status.config(text="Complete Step 2 first.", fg="#6C7293")
             self.btn_deploy_launcher.config(state=tk.DISABLED, text="↻ Restart ToolBox")
+        try:
+            self.btn_screenshots_pack.config(state=tk.NORMAL)
+        except Exception:
+            pass
 
         completed_steps = int(step1_done) + int(step2_done) + int(step2_done)
         self.update_wizard_step_indicators(completed_steps)
@@ -12814,39 +13560,58 @@ class ModernRebirthStudioToolBox:
             return install_dir
         return self.pick_rebirth_install_folder()
 
-    def require_download_files_for_install(self):
+    def require_installer_for_extract(self):
+        """Step 2 only needs the installer EXE — ISO is checked after unpack."""
         status = scan_rebirth_download_status(self.config)
-        missing = []
-        if not status["iso_ready"]:
-            missing.append("ReBirth ISO")
-        if not status["installer_ready"]:
-            missing.append("ReBirth RB-338 2.0.1 Installer")
-        if missing:
-            self.verify_download_files()
-            messagebox.showwarning(
-                "Missing Download Files",
-                "Required files are not in the Downloads folder yet:\n\n- "
-                + "\n- ".join(missing)
-                + "\n\nConfigure https URLs in Settings, download manually, or use Verify.",
-            )
-            return False
-        return True
+        if status.get("installer_ready") and status.get("installer_path"):
+            return True
+        self.set_wizard_message("Installer EXE not found in Downloads yet.", "#FF9500")
+        messagebox.showwarning(
+            "Installer Missing",
+            "Step 2 unpacks the ReBirth installer EXE.\n\n"
+            "Place the installer into the Downloads folder first "
+            "(any sensible filename is OK).",
+        )
+        return False
 
     def run_rebirth_installer(self):
         """Step 2: unpack installer EXE with 7-Zip into the ToolBox folder (never launch setup)."""
         self.extract_rebirth_portable()
 
     def prompt_restart_after_install(self):
+        """Single post-install dialog (ISO warning or restart ask). Never call from the status poll."""
+        if getattr(self, "_post_install_dialog_shown", False):
+            return
         if not is_rebirth_exe_ready():
             return
+        # Set BEFORE any UI work so a second caller cannot sneak in.
+        self._post_install_dialog_shown = True
+        self._install_restart_prompted = True
+
         self.config["rebirth_install_dir"] = BASE_DIR
         save_config(self.config)
         self.refresh_get_rebirth_ui()
-        if messagebox.askyesno(
-            "ReBirth Installed",
-            "Rebirth.exe was detected in the ToolBox folder.\n\nRestart ToolBox now to unlock all tabs?",
-        ):
-            self.restart_application()
+
+        iso_ok = bool(find_iso_file(self.config))
+        if not iso_ok:
+            messagebox.showwarning(
+                "ISO still required",
+                "ReBirth was unpacked successfully.\n\n"
+                "The program will NOT launch until a ReBirth *.iso is present "
+                "(in Downloads or the ToolBox folder).\n\n"
+                "Add the ISO, then use Restart ToolBox when you are ready.",
+            )
+            self.set_wizard_message(
+                "Extract done — add a ReBirth *.iso before launching (CD check).",
+                "#FF9500",
+            )
+            return
+
+            if messagebox.askyesno(
+                "ReBirth Installed",
+                "Rebirth.exe was detected in the ToolBox folder.\n\nRestart ToolBox now to unlock all tabs?",
+            ):
+                self.restart_application()
 
     def restart_application(self):
         launcher_path = os.path.join(BASE_DIR, LAUNCHER_MAIN_FILE)
@@ -12872,19 +13637,23 @@ class ModernRebirthStudioToolBox:
         self.root.after(120, self.root.destroy)
 
     def extract_rebirth_portable(self):
-        if not self.require_download_files_for_install():
+        # Silent Step 2: no ISO checklist popup — installer alone is enough to unpack.
+        if getattr(self, "_extract_in_progress", False):
+            return
+        if not self.require_installer_for_extract():
             return
         status = scan_rebirth_download_status(self.config)
-        if not status["installer_ready"]:
+        installer_path = status.get("installer_path")
+        if not installer_path:
             self.set_wizard_message("Download the installer in Step 1 first.", "#FF9500")
             return
 
-        if not find_seven_zip_executable():
-            messagebox.showerror(
-                "7-Zip Required",
-                "Step 2 only unpacks the installer EXE — it never runs setup.\n\n"
-                "Install 7-Zip (https://www.7-zip.org/) or copy 7z.exe into the ToolBox folder.",
-            )
+        # 7-Zip may be fetched as portable 7za.exe from the ToolBox release if missing.
+        seven_zip, zip_err = ensure_seven_zip_available(
+            progress_callback=lambda msg: self.set_wizard_message(msg, "#00E5FF")
+        )
+        if not seven_zip:
+            messagebox.showerror("7-Zip Required", zip_err or "7-Zip / 7za.exe not available.")
             self.set_wizard_message("7-Zip required to unpack the installer EXE.", "#FF9500")
             return
 
@@ -12893,29 +13662,63 @@ class ModernRebirthStudioToolBox:
         self.config["rebirth_install_dir"] = install_dir
         save_config(self.config)
 
+        self._extract_in_progress = True
+        try:
+            self.btn_run_installer.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
         self.show_loading_overlay("Extracting ReBirth…", f"Unpacking installer into:\n{install_dir}")
         self.set_wizard_message(f"Unpacking installer into:\n{install_dir}", "#00E5FF")
         self.lbl_step2_status.config(
             text=f"Extracting into:\n{install_dir}\n\nPlease wait…",
             fg="#00E5FF",
         )
-        installer_path = status["installer_path"]
+        # Kill poll + any pending restart popup scheduled earlier.
+        try:
+            self.cancel_rebirth_status_poll()
+        except Exception:
+            pass
+        self._install_restart_prompted = True
 
         def worker():
             try:
                 ok, rebirth_exe, mode = extract_rebirth_installer(installer_path, install_dir)
                 if not ok:
-                    self.root.after(0, lambda msg=mode: messagebox.showerror("Extract Failed", msg))
-                    self.root.after(0, self.hide_loading_overlay)
-                    self.root.after(0, self.refresh_get_rebirth_ui)
+                    def fail(msg=mode):
+                        self._extract_in_progress = False
+                        try:
+                            self.btn_run_installer.config(state=tk.NORMAL)
+                        except Exception:
+                            pass
+                        self.hide_loading_overlay()
+                        messagebox.showerror("Extract Failed", msg)
+                        self.refresh_get_rebirth_ui()
+
+                    self.root.after(0, fail)
                     return
 
                 def done():
+                    self._extract_in_progress = False
+                    try:
+                        if is_rebirth_exe_ready():
+                            self.btn_run_installer.config(state=tk.DISABLED)
+                        else:
+                            self.btn_run_installer.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
                     self.hide_loading_overlay()
-                    self.set_wizard_message(
-                        f"Step 2 complete — ReBirth unpacked into:\n{install_dir}",
-                        "#00FF66",
-                    )
+                    iso_ok = bool(find_iso_file(self.config))
+                    if iso_ok:
+                        self.set_wizard_message(
+                            f"Step 2 complete — ReBirth unpacked into:\n{install_dir}",
+                            "#00FF66",
+                        )
+                    else:
+                        self.set_wizard_message(
+                            "Extract done — ReBirth will not launch until a *.iso is present.",
+                            "#FF9500",
+                        )
                     self.refresh_get_rebirth_ui()
                     if is_rebirth_exe_ready():
                         self.prompt_restart_after_install()
@@ -12923,9 +13726,18 @@ class ModernRebirthStudioToolBox:
                 self.root.after(0, done)
             except Exception as exc:
                 error_text = str(exc)
-                self.root.after(0, lambda msg=error_text: messagebox.showerror("Extract Failed", msg))
-                self.root.after(0, self.hide_loading_overlay)
-                self.root.after(0, self.refresh_get_rebirth_ui)
+
+                def boom(msg=error_text):
+                    self._extract_in_progress = False
+                    try:
+                        self.btn_run_installer.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    self.hide_loading_overlay()
+                    messagebox.showerror("Extract Failed", msg)
+                    self.refresh_get_rebirth_ui()
+
+                self.root.after(0, boom)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -12956,6 +13768,154 @@ class ModernRebirthStudioToolBox:
             self.refresh_get_rebirth_ui()
         except Exception as exc:
             messagebox.showerror("Deploy Failed", str(exc))
+
+    def _refresh_step3_screenshots_status(self, auto_extract=False):
+        if not hasattr(self, "lbl_step3_screenshots"):
+            return
+        if mod_screenshots_look_populated():
+            self.lbl_step3_screenshots.config(
+                text="✔ Mod screenshots ready (Mods/Screenshots)",
+                fg="#00FF66",
+            )
+            return
+        pack = find_screenshots_pack_archive(self.config)
+        if pack and auto_extract and not getattr(self, "_screenshots_auto_extracting", False):
+            self._screenshots_auto_extracting = True
+
+            def worker():
+                seven_zip, err = ensure_seven_zip_available()
+                if not seven_zip:
+                    def fail():
+                        self._screenshots_auto_extracting = False
+                        self.lbl_step3_screenshots.config(
+                            text=f"Pack found · need 7za to unpack:\n{os.path.basename(pack)}",
+                            fg="#FF9500",
+                        )
+                    self.root.after(0, fail)
+                    return
+                ok, detail = extract_screenshots_pack_to_mods(pack, seven_zip=seven_zip)
+
+                def done():
+                    self._screenshots_auto_extracting = False
+                    if ok:
+                        self.lbl_step3_screenshots.config(
+                            text="✔ Screenshots unpacked into Mods/",
+                            fg="#00FF66",
+                        )
+                        self.set_wizard_message("Mod screenshots unpacked into Mods/Screenshots.", "#00FF66")
+                        try:
+                            self.mark_mod_gallery_dirty()
+                        except Exception:
+                            pass
+                    else:
+                        self.lbl_step3_screenshots.config(
+                            text=f"Pack found but unpack failed:\n{os.path.basename(pack)}",
+                            fg="#FF453A",
+                        )
+
+                self.root.after(0, done)
+
+            self.lbl_step3_screenshots.config(
+                text=f"Unpacking local pack…\n{os.path.basename(pack)}",
+                fg="#00E5FF",
+            )
+            threading.Thread(target=worker, daemon=True).start()
+            return
+        if pack:
+            self.lbl_step3_screenshots.config(
+                text=f"Pack ready to unpack:\n{os.path.basename(pack)}",
+                fg="#00E5FF",
+            )
+        else:
+            self.lbl_step3_screenshots.config(
+                text="Screenshots optional — download pack into Mods/",
+                fg="#6C7293",
+            )
+
+    def download_or_extract_screenshots_pack(self):
+        """Step 3: use local Screenshots.7z if present, otherwise download from GitHub Releases."""
+        if getattr(self, "_screenshots_job_running", False):
+            return
+        if mod_screenshots_look_populated():
+            if not messagebox.askyesno(
+                "Screenshots already present",
+                "Mods/Screenshots already has images.\n\nDownload / unpack the pack again anyway?",
+            ):
+                return
+
+        pack = find_screenshots_pack_archive(self.config)
+        self._screenshots_job_running = True
+        try:
+            self.btn_screenshots_pack.config(state=tk.DISABLED)
+        except Exception:
+            pass
+
+        def worker():
+            try:
+                seven_zip, zip_err = ensure_seven_zip_available(
+                    progress_callback=lambda msg: self.root.after(
+                        0, lambda: self.set_wizard_message(msg, "#00E5FF")
+                    )
+                )
+                if not seven_zip:
+                    raise RuntimeError(zip_err or "7-Zip / 7za.exe not available.")
+
+                local_pack = pack
+                if not local_pack:
+                    dest = os.path.join(get_downloads_dir(self.config), SCREENSHOTS_PACK_FILENAME)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    self.root.after(
+                        0,
+                        lambda: self.set_wizard_message(
+                            f"Downloading {SCREENSHOTS_PACK_FILENAME} from GitHub…",
+                            "#00E5FF",
+                        ),
+                    )
+                    download_file_with_progress(SCREENSHOTS_PACK_URL, dest, timeout=600)
+                    local_pack = dest
+
+                ok, detail = extract_screenshots_pack_to_mods(local_pack, seven_zip=seven_zip)
+                if not ok:
+                    raise RuntimeError(detail or "Could not unpack screenshots pack.")
+
+                def done():
+                    self._screenshots_job_running = False
+                    try:
+                        self.btn_screenshots_pack.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    self.set_wizard_message("Mod screenshots installed into Mods/Screenshots.", "#00FF66")
+                    self._refresh_step3_screenshots_status(auto_extract=False)
+                    try:
+                        invalidate_mod_screenshot_index_cache()
+                        self.mark_mod_gallery_dirty()
+                    except Exception:
+                        pass
+                    messagebox.showinfo(
+                        "Screenshots ready",
+                        f"Unpacked into:\n{os.path.join(MODS_DIR, 'Screenshots')}",
+                    )
+
+                self.root.after(0, done)
+            except Exception as exc:
+                err = str(exc)
+
+                def fail(message=err):
+                    self._screenshots_job_running = False
+                    try:
+                        self.btn_screenshots_pack.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    self.set_wizard_message(f"Screenshots pack failed: {message}", "#FF453A")
+                    messagebox.showerror("Screenshots pack", message)
+
+                self.root.after(0, fail)
+
+        if pack:
+            self.set_wizard_message(f"Unpacking local pack:\n{os.path.basename(pack)}", "#00E5FF")
+        else:
+            self.set_wizard_message("Downloading screenshots pack from GitHub Releases…", "#00E5FF")
+        threading.Thread(target=worker, daemon=True).start()
 
     def start_rebirth_download(self, file_key):
         if self.download_in_progress:
@@ -13419,8 +14379,8 @@ if __name__ == "__main__":
     hide_console_window()
     root = tk.Tk()
     root.title("ReBirth ToolBox")
-    root.geometry("920x900")
-    root.minsize(920, 780)
+    root.geometry(f"{WINDOW_START_WIDTH}x{WINDOW_START_HEIGHT}")
+    root.minsize(WINDOW_START_WIDTH, 780)
     root.configure(bg="#12131A")
     set_window_icon(root)
     early_splash = tk.Frame(root, bg="#12131A")
